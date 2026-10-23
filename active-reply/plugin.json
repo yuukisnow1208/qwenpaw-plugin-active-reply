@@ -1,0 +1,20 @@
+{
+  "id": "active-reply",
+  "name": "主动回复",
+  "version": "1.0.0",
+  "type": "general",
+  "description": "群聊里按概率选择性回复未被 @ 的消息，让机器人像群友一样偶尔接话。",
+  "author": "Yuukisnow",
+  "entry": {
+    "backend": "plugin.py",
+    "frontend": "dist/index.js"
+  },
+  "dependencies": [],
+  "qwenpaw_version": {
+    "min": "2.2.0"
+  },
+  "meta": {
+    "settings_route": "active-reply.settings",
+    "api_prefix": "/api/active-reply"
+  }
+}
