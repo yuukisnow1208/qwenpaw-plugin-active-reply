@@ -4,6 +4,10 @@
 群里机器人原本只有两种活法：要么每条都回，要么只有 @ 它才回。
 这个插件给了第三种：**按概率选择性回复**——没 @ 它的消息，也有机会被接话。
 
+行为规则（与频道「仅 @ 回复」开关协同）：
+    - 频道「仅 @ 回复」**开启**：只有 @ 才回复，插件不主动插话（尊重频道设置）
+    - 频道「仅 @ 回复」**关闭**：@ 必回；没 @ 的按概率回
+
 实现原理
 --------
 所有支持群聊的通道（QQ/OneBot、Telegram、飞书、Discord、元宝……）在收到群消息后，
@@ -19,11 +23,12 @@
             return True
         return bool(meta.get("bot_mentioned") or meta.get("has_bot_command"))
 
-所以在这里包一层，就能把「全回 / 只回@」的二选一，改成「按概率回」：
+所以在这里包一层，把「全回」模式收窄成「按概率回」：
 
-    原:  群里没 @ → 直接丢弃
-    改:  群里没 @ → 掷骰子 → 命中则当作被叫到，正常进入 agent 流程
+    原:  群里没 @ 且 require_mention=False → 全部放行（每条都回）
+    改:  群里没 @ 且 require_mention=False → 掷骰子 → 命中则进入 agent 流程
 
+如果频道把 ``require_mention`` 开了（仅 @ 回复），插件直接让位，保持原生行为。
 @ 了机器人依然 100% 回复，不受影响。
 """
 
@@ -45,7 +50,7 @@ import core  # noqa: E402  （同目录下的纯逻辑模块）
 logger = logging.getLogger("qwenpaw.plugin.active_reply")
 
 PLUGIN_ID = "active-reply"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 #: 判定原因 -> 中文说明，用于日志与设置页统计
 REASON_TEXT = {
@@ -54,6 +59,7 @@ REASON_TEXT = {
     "rate_limited": "超出每分钟配额，保持沉默",
     "cooldown": "冷却中，保持沉默",
     "min_interval": "未到最小间隔，保持沉默",
+    "mention_only": "频道仅 @ 回复模式，不主动插话",
     "disabled": "插件已关闭",
 }
 
@@ -71,9 +77,11 @@ class ActiveReplyPlugin:
             "mentioned": 0,
             "proactive": 0,
             "ignored": 0,
+            "mention_mode": 0,
             "whitelist_skipped": 0,
             "errors": 0,
         }
+        self.require_mention_state: Optional[bool] = None
         self._patched = False
         self._original = None
 
@@ -182,7 +190,7 @@ class ActiveReplyPlugin:
         self._patched = True
 
     def _decide(self, channel: Any, is_group: bool, meta: dict) -> bool:
-        """核心判定：先跑原生逻辑，再按概率改写「未 @」的结论。"""
+        """核心判定：先跑原生逻辑，再按「仅 @ 回复」开关与概率改写「未 @」的结论。"""
         original = self._original
         original_result = original(channel, is_group, meta)
 
@@ -198,13 +206,27 @@ class ActiveReplyPlugin:
             self.stats["mentioned"] += 1
             return True
 
+        # 频道开启了「仅 @ 回复」-> 尊重该设置，未 @ 消息一律不主动回复。
+        # 这是用户在频道设置里的显式选择，插件不与之对抗。
+        require_mention = bool(getattr(channel, "require_mention", False))
+        self.require_mention_state = require_mention
+        if require_mention:
+            self.stats["mention_mode"] += 1
+            logger.debug(
+                "主动回复: channel=%s 仅 @ 回复模式，未 @ 消息保持沉默",
+                getattr(channel, "channel", "?"),
+            )
+            return False
+
         ids = core.group_ids(meta)
         if not core.in_whitelist(cfg, ids):
             self.stats["whitelist_skipped"] += 1
             return original_result
 
         key = core.state_key(getattr(channel, "channel", ""), ids)
-        allowed, reason = core.decide(cfg, self.state, key, now=time.time())
+        allowed, reason = core.decide(
+            cfg, self.state, key, now=time.time(), require_mention=require_mention
+        )
 
         if allowed:
             self.stats["proactive"] += 1
@@ -217,7 +239,10 @@ class ActiveReplyPlugin:
             )
             return True
 
-        self.stats["ignored"] += 1
+        if reason == "mention_only":
+            self.stats["mention_mode"] += 1
+        else:
+            self.stats["ignored"] += 1
         logger.debug(
             "主动回复: channel=%s group=%s -> %s",
             getattr(channel, "channel", "?"),
@@ -260,6 +285,13 @@ class ActiveReplyPlugin:
                     f"⚙️ 当前状态：{'开启' if plugin.config.enabled else '关闭'} · "
                     f"{plugin.config.method} · 概率 {plugin.config.probability}",
                 )
+                if plugin.require_mention_state is not None:
+                    lines.append(
+                        "📢 频道「仅 @ 回复」："
+                        + ("开启 → 只有 @ 才回复，插件不主动接话"
+                           if plugin.require_mention_state
+                           else "关闭 → @ 必回，不 @ 按概率回")
+                    )
                 return "\n".join(lines)
 
         try:
@@ -333,6 +365,7 @@ class ActiveReplyPlugin:
                 "patched": plugin._patched,
                 "stats": dict(plugin.stats),
                 "groups": plugin.state.snapshot(),
+                "require_mention": plugin.require_mention_state,
                 "config_path": str(plugin.config_path or ""),
             }
 

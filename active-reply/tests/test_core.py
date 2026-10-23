@@ -167,6 +167,31 @@ def main():
     check("试算条数正确", result["draws"] == 5000)
     check("试算比例接近 0.1", abs(result["ratio"] - 0.1) < 0.02, result["ratio"])
 
+    print("\n[12] 仅 @ 回复模式（尊重频道开关）")
+    state = core.ReplyState()
+    c = cfg(probability=1)
+    res = core.decide(c, state, "g7", now=1, require_mention=True)
+    check(
+        "仅 @ 模式 -> 一律不放行",
+        res == (False, "mention_only"),
+        res,
+    )
+    check("仅 @ 模式不消耗状态", state.snapshot(now=2) == {}, state.snapshot(now=2))
+    c2 = cfg(enabled=False, probability=1)
+    res2 = core.decide(c2, state, "g8", now=1, require_mention=True)
+    check("禁用优先于仅 @ 模式", res2 == (False, "disabled"), res2)
+    state2 = core.ReplyState()
+    c3 = cfg(probability=1, cooldown_seconds=30)
+    core.decide(c3, state2, "g9", now=100, require_mention=True)
+    res3 = core.decide(c3, state2, "g9", now=101)
+    check(
+        "仅 @ 模式跳过不占冷却",
+        res3[0] is True,
+        res3,
+    )
+    res4 = core.decide(c3, state2, "g9", now=102, require_mention=False)
+    check("默认（未传）按概率逻辑", res4[0] is False and res4[1] == "cooldown", res4)
+
     print("\n" + "=" * 60)
     print(f"通过 {PASSED} 项，失败 {len(FAILED)} 项")
     if FAILED:

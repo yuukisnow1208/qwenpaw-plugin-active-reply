@@ -118,6 +118,10 @@
     var sim = simState[0];
     var setSim = simState[1];
 
+    var mentionState = React.useState(null);
+    var requireMention = mentionState[0];
+    var setRequireMention = mentionState[1];
+
     React.useEffect(function () {
       request(API + "/config")
         .then(function (data) {
@@ -134,6 +138,11 @@
       request(API + "/status")
         .then(function (data) {
           setStats(data.stats || null);
+          setRequireMention(
+            data.require_mention === true || data.require_mention === false
+              ? data.require_mention
+              : null,
+          );
         })
         .catch(function () {
           setStats(null);
@@ -209,8 +218,8 @@
         key: "enabled",
         title: "主动回复",
         desc:
-          "开启后，群里没 @ 机器人的消息也会按概率被接话。\n" +
-          "@ 了机器人的消息始终 100% 回复，不受影响。",
+          "在频道「仅 @ 回复」关闭时生效：@ 必回，没 @ 的按概率接话。\n" +
+          "频道「仅 @ 回复」开启时本插件不生效（只有 @ 才回复），见页面顶部提示。",
         children: h(Switch, {
           checked: !!cfg.enabled,
           onChange: function (v) {
@@ -398,6 +407,16 @@
         ? h(
             "div",
             { style: { fontSize: "13px", lineHeight: "2" } },
+            h(
+              "div",
+              null,
+              "频道「仅 @ 回复」：" +
+                (requireMention === null
+                  ? "未识别（收到群消息后显示）"
+                  : requireMention
+                    ? "开启 → 插件不主动接话"
+                    : "关闭 → @ 必回，不 @ 按概率回"),
+            ),
             h("div", null, "群消息总数：" + stats.group_messages),
             h("div", null, "@ 机器人（必定回复）：" + stats.mentioned),
             h(
@@ -406,6 +425,13 @@
               h("b", null, "主动接话：" + stats.proactive),
               "　保持沉默：" + stats.ignored,
             ),
+            stats.mention_mode
+              ? h(
+                  "div",
+                  null,
+                  "仅 @ 回复模式跳过：" + stats.mention_mode,
+                )
+              : null,
             stats.whitelist_skipped
               ? h("div", null, "因白名单跳过：" + stats.whitelist_skipped)
               : null,
@@ -446,8 +472,27 @@
       h(Typography.Title ? Typography.Title : "h2", { level: 4 }, "主动回复"),
       h(
         "div",
-        { style: { fontSize: "12px", opacity: 0.6, marginBottom: "8px" } },
-        "群里没被 @ 的时候，也有机会接一句话",
+        { style: { fontSize: "12px", opacity: 0.6, marginBottom: "12px" } },
+        "让机器人在群里像群友一样，偶尔接一句没 @ 它的话",
+      ),
+      h(
+        Alert,
+        {
+          type:
+            requireMention === null
+              ? "info"
+              : requireMention
+                ? "warning"
+                : "success",
+          showIcon: true,
+          style: { marginBottom: "12px" },
+          message:
+            requireMention === null
+              ? "行为说明：频道「仅 @ 回复」关闭时，@ 必回、没 @ 按概率回；开启时只有 @ 才回复。收到群消息后这里会显示当前状态。"
+              : requireMention
+                ? "当前频道「仅 @ 回复」已开启：机器人只回复 @ 它的消息，本插件不主动接话。想启用主动回复，请到频道设置里关闭「仅 @ 回复」。"
+                : "当前频道「仅 @ 回复」已关闭：@ 机器人的消息 100% 回复；没 @ 的消息按下方概率决定是否接话。",
+        },
       ),
       status
         ? h(Alert, {

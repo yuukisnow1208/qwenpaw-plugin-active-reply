@@ -11,11 +11,14 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import random
 import sys
 from pathlib import Path
 
-PLUGIN_DIR = Path("/app/working/plugins/active-reply")
+PLUGIN_DIR = Path(
+    os.environ.get("AR_PLUGIN_DIR", "/app/working/plugins/active-reply")
+)
 
 PASSED = 0
 FAILED = []
@@ -98,19 +101,19 @@ def main():
     ch = make_channel()
     check("概率 0 但被 @ 仍回复", mention(ch, AT) is True)
 
-    print("\n[2] 概率 1 -> 未 @ 也回复（主动接话）")
+    print("\n[2] 「仅 @ 回复」关闭时，概率 1 -> 未 @ 也回复（主动接话）")
     set_cfg(probability=1.0)
-    ch = make_channel()
+    ch = make_channel(require_mention=False)
     check("概率 1 主动接话", mention(ch, GROUP) is True)
 
-    print("\n[3] 概率 0 -> 未 @ 保持沉默")
+    print("\n[3] 「仅 @ 回复」关闭时，概率 0 -> 未 @ 保持沉默")
     set_cfg(probability=0.0)
-    ch = make_channel()
+    ch = make_channel(require_mention=False)
     check("概率 0 不接话", mention(ch, GROUP) is False)
 
-    print("\n[4] 概率 0.1 的实际命中率")
+    print("\n[4] 「仅 @ 回复」关闭时，概率 0.1 的实际命中率")
     set_cfg(probability=0.1)
-    ch = make_channel()
+    ch = make_channel(require_mention=False)
     random.seed(7)
     hits = sum(1 for _ in range(2000) if mention(ch, GROUP))
     ratio = hits / 2000
@@ -123,47 +126,65 @@ def main():
     check("关闭后未 @ 不回复", mention(ch, GROUP) is False)
     check("关闭后被 @ 仍回复", mention(ch, AT) is True)
 
-    print("\n[6] 白名单")
+    print("\n[6] 白名单（仅 @ 回复关闭时）")
     set_cfg(probability=1.0, whitelist=["999"])
-    ch = make_channel()
-    check("白名单外的群不接话", mention(ch, GROUP) is False)
+    ch = make_channel(require_mention=False)
+    check(
+        "白名单外的群 -> 保持频道原生行为（全回模式下照常回复）",
+        mention(ch, GROUP) is True,
+    )
     set_cfg(probability=1.0, whitelist=["123456"])
-    ch = make_channel()
+    ch = make_channel(require_mention=False)
     check("白名单内的群接话", mention(ch, GROUP) is True)
     set_cfg(probability=1.0, whitelist=[])
-    ch = make_channel()
+    ch = make_channel(require_mention=False)
     check("白名单为空 -> 全部群生效", mention(ch, GROUP) is True)
+    set_cfg(probability=0.0, whitelist=["999"])
+    ch = make_channel(require_mention=True)
+    check(
+        "仅 @ 模式下白名单外未 @ -> 不放行（与仅 @ 让位一致）",
+        mention(ch, GROUP) is False,
+    )
 
-    print("\n[7] 通道原本是「回复全部」时，插件会把它收窄为按概率")
+    print("\n[7] 通道原本是「回复全部」（仅 @ 回复关闭）时，插件收窄为按概率")
     set_cfg(probability=0.0)
     ch_open = make_channel(require_mention=False)
     check("全回模式 + 概率 0 -> 不接话", mention(ch_open, GROUP) is False)
     check("全回模式 + 被 @ -> 照常回复", mention(ch_open, AT) is True)
 
-    print("\n[8] 私聊不受影响")
+    print("\n[8] 「仅 @ 回复」开启时，插件完全让位")
+    set_cfg(probability=1.0)
+    ch_only = make_channel(require_mention=True)
+    check("概率 1 但仅 @ 模式 -> 不接话", mention(ch_only, GROUP) is False)
+    check("仅 @ 模式下被 @ -> 照常回复", mention(ch_only, AT) is True)
+    check("统计计入 mention_mode", plugin.stats["mention_mode"] > 0, plugin.stats)
+    check("状态记录 require_mention", plugin.require_mention_state is True, plugin.require_mention_state)
+
+    print("\n[9] 私聊不受影响")
     set_cfg(probability=0.0)
     ch = make_channel()
     check("私聊消息照常处理", mention(ch, {"is_group": False}, is_group=False) is True)
 
-    print("\n[9] 冷却")
+    print("\n[10] 冷却（仅 @ 回复关闭时）")
     set_cfg(probability=1.0, cooldown_seconds=60)
-    ch = make_channel()
+    ch = make_channel(require_mention=False)
     first = mention(ch, GROUP)
     second = mention(ch, GROUP)
     check("首次接话后进入冷却", first is True and second is False, (first, second))
 
-    print("\n[10] 每分钟配额")
+    print("\n[11] 每分钟配额（仅 @ 回复关闭时）")
     set_cfg(method="rate_limit", max_per_minute=2)
-    ch = make_channel()
+    ch = make_channel(require_mention=False)
     results = [mention(ch, GROUP) for _ in range(3)]
     check("配额 2 -> 前两条接话、第三条沉默", results == [True, True, False], results)
 
-    print("\n[11] 统计")
+    print("\n[12] 统计")
     print("     stats:", plugin.stats)
     check("统计里有主动接话记录", plugin.stats["proactive"] > 0, plugin.stats)
     check("统计里有沉默记录", plugin.stats["ignored"] > 0, plugin.stats)
+    check("统计里有仅 @ 模式跳过记录", plugin.stats["mention_mode"] > 0, plugin.stats)
 
-    print("\n[12] /sid 命令")
+    print("\n[13] /sid 命令")
     sid = api.commands[0]
     check("命令名是 /sid", sid.command_name == "/sid")
 

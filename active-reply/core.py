@@ -4,11 +4,14 @@
 纯 Python，不依赖 QwenPaw，方便单独跑单元测试。
 
 判定规则（对群聊里「没有 @ 机器人」的消息）：
-    - @ 了机器人        → 一定回复（与原逻辑一致，不受本插件影响）
-    - 未 @ 但命中概率   → 回复（这就是「主动回复」）
-    - 未 @ 且没命中     → 不回复
-无论通道原本是「回复全部」还是「仅 @ 回复」，都统一按上面这条规则走：
-原本「全回」的群会变成按概率回，原本「只回 @」的群会多出随机的主动回复。
+    - @ 了机器人                     → 一定回复（与原逻辑一致，不受本插件影响）
+    - 频道开着「仅 @ 回复」            → 一律不主动回复（尊重频道设置，只有 @ 才回）
+    - 频道关着「仅 @ 回复」且未 @：
+        - 命中概率                    → 回复（这就是「主动回复」）
+        - 没命中                      → 不回复
+
+也就是说，插件只在频道「回复全部消息」的模式下工作，把「全回」收窄成
+「@ 必回 + 不 @ 按概率回」；频道一旦切到「仅 @ 回复」，插件自动让位。
 """
 
 from __future__ import annotations
@@ -213,15 +216,24 @@ def decide(
     key: str,
     now: Optional[float] = None,
     rng: Optional[Any] = None,
+    require_mention: bool = False,
 ) -> Tuple[bool, str]:
     """判断这条「未 @ 机器人」的群消息要不要主动回复。
 
+    Args:
+        require_mention: 频道是否开启了「仅 @ 回复」。开启时一律不主动回复，
+            尊重用户在频道设置里的显式选择。
+
     Returns:
         (是否回复, 原因)。原因用于日志与统计：``hit`` / ``miss`` /
-        ``rate_limited`` / ``cooldown`` / ``min_interval`` / ``disabled``。
+        ``rate_limited`` / ``cooldown`` / ``min_interval`` / ``disabled`` /
+        ``mention_only``。
     """
     if not cfg.enabled:
         return False, "disabled"
+
+    if require_mention:
+        return False, "mention_only"
 
     now = time.time() if now is None else now
     rng = random.random if rng is None else rng
