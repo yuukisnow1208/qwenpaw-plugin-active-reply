@@ -10,6 +10,11 @@
  * 保存策略（v1.0.2 起）：显式保存。
  * 控件改动只更新页面本地状态，点击「保存更改」才写入后端；
  * 保存结果（成功 / 失败及详细原因）明确提示，杜绝"改了不知道存没存"。
+ *
+ * v1.0.3：修复保存报 405 / 配置读不到（显示默认值）的问题。
+ * 宿主的 QP.host.fetch 内部会先过一遍 getApiUrl()，等价于 "/api" + path；
+ * 再传 "/api/active-reply/config" 会被拼成 "/api/api/active-reply/config"
+ * → GET 404、PUT 405。这里按宿主规则自动选择正确写法，并留了 404/405 重试兜底。
  */
 
 (function () {
@@ -23,7 +28,28 @@
   var h = React.createElement;
 
   var PLUGIN_ID = "active-reply";
-  var API = "/api/active-reply";
+
+  var REL_API = "/active-reply"; // 不带 /api 前缀（宿主 fetch 会自己补）
+  var FULL_API = "/api" + REL_API; // 完整路径（原生 fetch 用）
+
+  var USE_HOST_FETCH = !!(QP.host && typeof QP.host.fetch === "function");
+
+  // 探测宿主是否会补 /api：getApiUrl("/x") 返回 "/api/x" 说明会自动补
+  var HOST_ADDS_PREFIX = (function () {
+    try {
+      if (QP.host && typeof QP.host.getApiUrl === "function") {
+        var probe = QP.host.getApiUrl("/__active_reply_probe__");
+        return typeof probe === "string" && probe.indexOf("/api") === 0;
+      }
+    } catch (err) {
+      /* 探测失败时按默认处理 */
+    }
+    return true; // 有 host.fetch 的宿主默认会补 /api（当前实现如此）
+  })();
+
+  var API = USE_HOST_FETCH && HOST_ADDS_PREFIX ? REL_API : FULL_API;
+  // 兜底写法：万一上面判断反了，遇到 404/405 时换一种再试一次
+  var API_ALT = API === REL_API ? FULL_API : USE_HOST_FETCH ? REL_API : null;
 
   var Card = antd.Card;
   var Switch = antd.Switch;
@@ -48,16 +74,40 @@
     min_interval_seconds: 0,
   };
 
+  function callFetch(url, options) {
+    if (USE_HOST_FETCH) {
+      return QP.host.fetch(url, options || {});
+    }
+    return window.fetch(url, options || {});
+  }
+
   function request(path, options) {
-    var fetcher = QP.host.fetch || window.fetch.bind(window);
-    return fetcher(path, options || {}).then(function (resp) {
-      return resp.json().then(function (data) {
-        if (!resp.ok) {
-          var detail = data && data.detail ? data.detail : JSON.stringify(data);
-          throw new Error("HTTP " + resp.status + " " + detail);
-        }
-        return data;
+    function attempt(url) {
+      return callFetch(url, options).then(function (resp) {
+        return resp.text().then(function (text) {
+          var data = null;
+          try {
+            data = JSON.parse(text);
+          } catch (err) {
+            data = null;
+          }
+          if (!resp.ok) {
+            var detail =
+              data && data.detail ? data.detail : String(text || "").slice(0, 120);
+            throw new Error(
+              "HTTP " + resp.status + " " + detail + "（地址：" + url + "）",
+            );
+          }
+          return data;
+        });
       });
+    }
+    return attempt(API + path).catch(function (err) {
+      // 路径被宿主二次拼接（404/405）时，换另一种写法再试一次
+      if (API_ALT && /HTTP (?:404|405)\b/.test(err.message)) {
+        return attempt(API_ALT + path);
+      }
+      throw err;
     });
   }
 
@@ -145,7 +195,7 @@
     var setRequireMention = mentionState[1];
 
     React.useEffect(function () {
-      request(API + "/config")
+      request("/config")
         .then(function (data) {
           var loaded = Object.assign({}, DEFAULTS, data.config || {});
           setCfg(loaded);
@@ -160,7 +210,7 @@
     }, []);
 
     function refreshStats() {
-      request(API + "/status")
+      request("/status")
         .then(function (data) {
           setStats(data.stats || null);
           setRequireMention(
@@ -186,7 +236,7 @@
       }
       setSaving(true);
       setStatus("正在保存…");
-      request(API + "/config", {
+      request("/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(cfg),
@@ -489,7 +539,7 @@
             size: "small",
             danger: true,
             onClick: function () {
-              request(API + "/reset-stats", { method: "POST" }).then(function () {
+              request("/reset-stats", { method: "POST" }).then(function () {
                 refreshStats();
               });
             },
@@ -507,7 +557,7 @@
     );
 
     function runSimulate() {
-      request(API + "/simulate", {
+      request("/simulate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ draws: 1000 }),
