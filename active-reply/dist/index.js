@@ -6,6 +6,10 @@
  *
  * 注册：设置菜单（primary.settings）+ 路由 /settings/active-reply
  * 配置读写走 /api/active-reply/*。
+ *
+ * 保存策略（v1.0.2 起）：显式保存。
+ * 控件改动只更新页面本地状态，点击「保存更改」才写入后端；
+ * 保存结果（成功 / 失败及详细原因）明确提示，杜绝"改了不知道存没存"。
  */
 
 (function () {
@@ -47,8 +51,18 @@
   function request(path, options) {
     var fetcher = QP.host.fetch || window.fetch.bind(window);
     return fetcher(path, options || {}).then(function (resp) {
-      return resp.json();
+      return resp.json().then(function (data) {
+        if (!resp.ok) {
+          var detail = data && data.detail ? data.detail : JSON.stringify(data);
+          throw new Error("HTTP " + resp.status + " " + detail);
+        }
+        return data;
+      });
     });
+  }
+
+  function sameConfig(a, b) {
+    return JSON.stringify(a || {}) === JSON.stringify(b || {});
   }
 
   function Row(props) {
@@ -102,6 +116,10 @@
     var cfg = cfgState[0];
     var setCfg = cfgState[1];
 
+    var savedState = React.useState(null);
+    var saved = savedState[0];
+    var setSaved = savedState[1];
+
     var statusState = React.useState("");
     var status = statusState[0];
     var setStatus = statusState[1];
@@ -118,6 +136,10 @@
     var sim = simState[0];
     var setSim = simState[1];
 
+    var savingState = React.useState(false);
+    var saving = savingState[0];
+    var setSaving = savingState[1];
+
     var mentionState = React.useState(null);
     var requireMention = mentionState[0];
     var setRequireMention = mentionState[1];
@@ -125,11 +147,14 @@
     React.useEffect(function () {
       request(API + "/config")
         .then(function (data) {
-          setCfg(Object.assign({}, DEFAULTS, data.config || {}));
+          var loaded = Object.assign({}, DEFAULTS, data.config || {});
+          setCfg(loaded);
+          setSaved(loaded);
         })
-        .catch(function () {
+        .catch(function (err) {
           setCfg(Object.assign({}, DEFAULTS));
-          setStatus("未能读取后端配置，显示的是默认值");
+          setSaved(Object.assign({}, DEFAULTS));
+          setStatus("读取配置失败：" + err.message + "（显示的是默认值，保存前请先排查）");
         });
       refreshStats();
     }, []);
@@ -149,41 +174,40 @@
         });
     }
 
-    function update(patch) {
-      var next = Object.assign({}, cfg, patch);
-      setCfg(next);
+    function setField(patch) {
+      setCfg(Object.assign({}, cfg, patch));
+    }
+
+    var dirty = !!cfg && !!saved && !sameConfig(cfg, saved);
+
+    function save() {
+      if (!cfg || saving) {
+        return;
+      }
+      setSaving(true);
+      setStatus("正在保存…");
       request(API + "/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
+        body: JSON.stringify(cfg),
       })
         .then(function (data) {
-          setCfg(Object.assign({}, DEFAULTS, (data && data.config) || next));
-          setStatus("已保存，立即生效（无需重启）");
+          var applied = Object.assign({}, DEFAULTS, (data && data.config) || cfg);
+          setCfg(applied);
+          setSaved(applied);
+          setStatus("已保存，重启后依然生效");
         })
         .catch(function (err) {
-          setStatus("保存失败：" + err);
+          setStatus("保存失败：" + err.message + "（配置未写入，请重试或截图反馈）");
+        })
+        .then(function () {
+          setSaving(false);
         });
     }
 
-    function runSimulate() {
-      request(API + "/simulate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ draws: 1000 }),
-      })
-        .then(function (data) {
-          setSim(
-            "模拟 1000 条未 @ 的群消息，预计回复 " +
-              data.hits +
-              " 条（占比 " +
-              (data.ratio * 100).toFixed(1) +
-              "%）",
-          );
-        })
-        .catch(function (err) {
-          setSim("试算失败：" + err);
-        });
+    function revert() {
+      setCfg(Object.assign({}, saved || DEFAULTS));
+      setStatus("已撤销未保存的更改");
     }
 
     function addId() {
@@ -196,11 +220,11 @@
         list.push(value);
       }
       setNewId("");
-      update({ whitelist: list });
+      setField({ whitelist: list });
     }
 
     function removeId(id) {
-      update({
+      setField({
         whitelist: (cfg.whitelist || []).filter(function (x) {
           return x !== id;
         }),
@@ -210,6 +234,29 @@
     if (!cfg) {
       return h("div", { style: { padding: "24px" } }, "加载中…");
     }
+
+    var saveButtons = h(
+      Space,
+      null,
+      h(
+        Button,
+        {
+          type: "primary",
+          loading: saving,
+          disabled: !dirty || saving,
+          onClick: save,
+        },
+        "保存更改",
+      ),
+      h(
+        Button,
+        {
+          disabled: !dirty || saving,
+          onClick: revert,
+        },
+        "撤销更改",
+      ),
+    );
 
     var rows = [];
 
@@ -223,7 +270,7 @@
         children: h(Switch, {
           checked: !!cfg.enabled,
           onChange: function (v) {
-            update({ enabled: !!v });
+            setField({ enabled: !!v });
           },
         }),
       }),
@@ -240,7 +287,7 @@
           value: cfg.method,
           style: { width: "100%" },
           onChange: function (v) {
-            update({ method: v });
+            setField({ method: v });
           },
           options: [
             { value: "possibility_reply", label: "possibility_reply（概率）" },
@@ -268,10 +315,7 @@
                 step: 0.01,
                 value: Number(cfg.probability),
                 onChange: function (v) {
-                  setCfg(Object.assign({}, cfg, { probability: v }));
-                },
-                onAfterChange: function (v) {
-                  update({ probability: v });
+                  setField({ probability: v });
                 },
               }),
             ),
@@ -283,7 +327,7 @@
               value: Number(cfg.probability),
               style: { width: "90px" },
               onChange: function (v) {
-                update({ probability: v == null ? 0.1 : v });
+                setField({ probability: v == null ? 0.1 : v });
               },
             }),
           ),
@@ -301,7 +345,7 @@
             value: cfg.max_per_minute,
             style: { width: "100%" },
             onChange: function (v) {
-              update({ max_per_minute: v == null ? 0 : v });
+              setField({ max_per_minute: v == null ? 0 : v });
             },
           }),
         }),
@@ -372,7 +416,7 @@
           value: cfg.cooldown_seconds,
           style: { width: "100%" },
           onChange: function (v) {
-            update({ cooldown_seconds: v == null ? 0 : v });
+            setField({ cooldown_seconds: v == null ? 0 : v });
           },
         }),
       }),
@@ -389,7 +433,7 @@
           value: cfg.min_interval_seconds,
           style: { width: "100%" },
           onChange: function (v) {
-            update({ min_interval_seconds: v == null ? 0 : v });
+            setField({ min_interval_seconds: v == null ? 0 : v });
           },
         }),
       }),
@@ -426,11 +470,7 @@
               "　保持沉默：" + stats.ignored,
             ),
             stats.mention_mode
-              ? h(
-                  "div",
-                  null,
-                  "仅 @ 回复模式跳过：" + stats.mention_mode,
-                )
+              ? h("div", null, "仅 @ 回复模式跳过：" + stats.mention_mode)
               : null,
             stats.whitelist_skipped
               ? h("div", null, "因白名单跳过：" + stats.whitelist_skipped)
@@ -466,6 +506,26 @@
         : null,
     );
 
+    function runSimulate() {
+      request(API + "/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ draws: 1000 }),
+      })
+        .then(function (data) {
+          setSim(
+            "模拟 1000 条未 @ 的群消息，预计回复 " +
+              data.hits +
+              " 条（占比 " +
+              (data.ratio * 100).toFixed(1) +
+              "%）",
+          );
+        })
+        .catch(function (err) {
+          setSim("试算失败：" + err.message);
+        });
+    }
+
     return h(
       "div",
       { style: { padding: "24px", maxWidth: "900px" } },
@@ -494,15 +554,38 @@
                 : "当前频道「仅 @ 回复」已关闭：@ 机器人的消息 100% 回复；没 @ 的消息按下方概率决定是否接话。",
         },
       ),
+      dirty
+        ? h(
+            Alert,
+            {
+              type: "warning",
+              showIcon: true,
+              style: { marginBottom: "12px" },
+              message: "有未保存的更改，记得点击「保存更改」",
+            },
+          )
+        : null,
       status
         ? h(Alert, {
             message: status,
-            type: /失败|错误/.test(status) ? "error" : "success",
+            type: /失败|错误/.test(status) ? "error" : /保存中/.test(status) ? "info" : "success",
             style: { marginBottom: "12px" },
             closable: true,
           })
         : null,
-      h(Card, null, rows, h(Divider, null), statsPanel),
+      h(
+        Card,
+        null,
+        rows,
+        h(Divider, null),
+        h(
+          "div",
+          { style: { display: "flex", justifyContent: "flex-end", gap: "8px" } },
+          saveButtons,
+        ),
+        h(Divider, null),
+        statsPanel,
+      ),
     );
   }
 

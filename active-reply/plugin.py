@@ -50,7 +50,7 @@ import core  # noqa: E402  （同目录下的纯逻辑模块）
 logger = logging.getLogger("qwenpaw.plugin.active_reply")
 
 PLUGIN_ID = "active-reply"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 #: 判定原因 -> 中文说明，用于日志与设置页统计
 REASON_TEXT = {

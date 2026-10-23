@@ -1,7 +1,7 @@
 {
   "id": "active-reply",
   "name": "主动回复",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "general",
   "description": "群聊「仅 @ 回复」关闭时，未被 @ 的消息按概率选择性回复，让机器人像群友一样偶尔接话；「仅 @ 回复」开启时完全让位，只有 @ 才回复。",
   "author": "Yuukisnow",
