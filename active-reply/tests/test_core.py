@@ -192,6 +192,172 @@ def main():
     res4 = core.decide(c3, state2, "g9", now=102, require_mention=False)
     check("默认（未传）按概率逻辑", res4[0] is False and res4[1] == "cooldown", res4)
 
+    print("\n[13] 用户 ID 提取（不同通道字段不同）")
+    check(
+        "OneBot sender_id",
+        core.user_ids(
+            {"sender_id": "12345678", "group_id": "123456", "is_group": True},
+        )
+        == ["12345678"],
+    )
+    check(
+        "元宝 raw_sender_id",
+        core.user_ids({"raw_sender_id": "u_abc", "group_code": "g"}) == ["u_abc"],
+    )
+    check(
+        "飞书 feishu_sender_id",
+        core.user_ids({"feishu_sender_id": "ou_123"}) == ["ou_123"],
+    )
+    check(
+        "嵌套 sender 对象",
+        core.user_ids({"sender": {"user_id": 12345678, "nickname": "n"}})
+        == ["12345678"],
+    )
+    check("空 meta", core.user_ids({}) == [])
+    check("None 安全", core.user_ids(None) == [])
+
+    print("\n[14] 用户规则：规整与匹配")
+    c = core.ActiveReplyConfig.from_dict(
+        {
+            "user_rules": [
+                {"sid": " 12345678 ", "probability": "1"},
+                {"no_sid": 1},
+                "垃圾数据",
+                {"sid": "2", "method": "不存在", "cooldown_seconds": -3},
+                {"user_id": "88", "min_interval_seconds": ""},
+            ],
+        },
+    )
+    check("非法规则被丢弃，剩 3 条", len(c.user_rules) == 3, c.user_rules)
+    check(
+        "sid 去空格 + 字符串概率转浮点",
+        c.user_rules[0]["sid"] == "12345678" and c.user_rules[0]["probability"] == 1.0,
+        c.user_rules[0],
+    )
+    check(
+        "非法方法/负冷却 -> 继承全局 / 夹到 0",
+        c.user_rules[1]["method"] is None and c.user_rules[1]["cooldown_seconds"] == 0.0,
+        c.user_rules[1],
+    )
+    check(
+        "user_id 别名 + 空字符串视为继承",
+        c.user_rules[2]["sid"] == "88"
+        and c.user_rules[2]["min_interval_seconds"] is None,
+        c.user_rules[2],
+    )
+    check(
+        "to_dict 往返后规则不变",
+        core.ActiveReplyConfig.from_dict(c.to_dict()).user_rules == c.user_rules,
+    )
+
+    c1 = cfg(user_rules=[{"sid": "12345678", "probability": 1}])
+    check(
+        "match_user_rule 命中",
+        (core.match_user_rule(c1, ["123", "12345678"]) or {}).get("sid")
+        == "12345678",
+    )
+    check(
+        "match_user_rule 未命中 -> None",
+        core.match_user_rule(c1, ["999"]) is None,
+    )
+    check("无候选 ID -> None", core.match_user_rule(c1, []) is None)
+    check(
+        "多条规则取第一条",
+        (
+            core.match_user_rule(
+                cfg(
+                    user_rules=[
+                        {"sid": "12345678", "probability": 0.5},
+                        {"sid": "12345678", "probability": 1},
+                    ],
+                ),
+                ["12345678"],
+            )
+            or {}
+        ).get("probability")
+        == 0.5,
+    )
+    print("\n[15] 用户规则：生效配置合并")
+    base = cfg(probability=0.1, cooldown_seconds=30, method="possibility_reply")
+    eff = core.effective_config(
+        base, {"sid": "u", "probability": 1.0, "cooldown_seconds": 0.0},
+    )
+    check("规则概率覆盖", eff.probability == 1.0, eff.probability)
+    check("规则显式 0 覆盖冷却", eff.cooldown_seconds == 0.0, eff.cooldown_seconds)
+    check("未设置的字段继承全局", eff.method == base.method and eff.max_per_minute == base.max_per_minute)
+    check("全局配置本身不被修改", base.probability == 0.1 and base.cooldown_seconds == 30.0)
+    check(
+        "空覆盖 -> 原配置对象",
+        core.effective_config(base, {"sid": "u"}) is base,
+    )
+    check(
+        "非 dict 规则 -> 原配置对象",
+        core.effective_config(base, None) is base,
+    )
+
+    print("\n[16] 用户规则：判定与独立记账")
+    state = core.ReplyState()
+    c = cfg(probability=0, user_rules=[{"sid": "12345678", "probability": 1}])
+    rule = core.match_user_rule(c, ["12345678"])
+    allowed, _ = core.decide(
+        core.effective_config(c, rule), state, "onebot:123456:u12345678", now=1,
+    )
+    check("全局概率 0 + 用户规则概率 1 -> 回复", allowed is True)
+    check(
+        "其他人不受规则影响",
+        core.decide(c, state, "onebot:123456", now=2)[0] is False,
+    )
+
+    state = core.ReplyState()
+    c = cfg(
+        probability=1,
+        cooldown_seconds=60,
+        user_rules=[{"sid": "12345678", "cooldown_seconds": 0}],
+    )
+    rule = core.match_user_rule(c, ["12345678"])
+    key = core.user_state_key("onebot", ["123456"], "12345678")
+    first = core.decide(core.effective_config(c, rule), state, key, now=100)[0]
+    second = core.decide(core.effective_config(c, rule), state, key, now=101)[0]
+    other = core.decide(c, state, "onebot:123456", now=102)[0]
+    check("规则用户冷却 0：连发都回", first is True and second is True)
+    check(
+        "规则用户独立记账，无规则者不受其冷却影响",
+        other is True,
+        other,
+    )
+    check(
+        "用户键与群键互不污染",
+        core.user_state_key("onebot", ["123456"], "u1") != core.state_key("onebot", ["123456"]),
+    )
+
+    print("\n[17] 用户规则：与白名单/仅 @ 开关的层级")
+    check(
+        "仅 @ 模式下规则也不放行（插件让位）",
+        core.decide(
+            core.effective_config(
+                cfg(probability=1, user_rules=[{"sid": "12345678", "probability": 1}]),
+                {"sid": "12345678", "probability": 1},
+            ),
+            core.ReplyState(),
+            "k",
+            now=1,
+            require_mention=True,
+        )[1]
+        == "mention_only",
+    )
+    check(
+        "规则不绕过群白名单（in_whitelist 先行）",
+        core.in_whitelist(cfg(whitelist=["111"]), ["999"]) is False,
+    )
+
+    print("\n[18] 试算（全局与用户规则参数都走 simulate）")
+    result = core.simulate(cfg(probability=0.1), draws=5000, seed=7)
+    print("     试算结果:", result)
+    check("试算条数正确", result["draws"] == 5000)
+    check("试算比例接近 0.1", abs(result["ratio"] - 0.1) < 0.02, result["ratio"])
+    always = core.simulate(cfg(probability=0, user_rules=[]), draws=100, seed=3)
+    check("概率 0 试算命中 0 条", always["hits"] == 0, always)
+
     print("\n" + "=" * 60)
     print(f"通过 {PASSED} 项，失败 {len(FAILED)} 项")
     if FAILED:

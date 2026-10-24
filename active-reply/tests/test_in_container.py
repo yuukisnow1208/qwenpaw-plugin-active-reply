@@ -178,6 +178,61 @@ def main():
     results = [mention(ch, GROUP) for _ in range(3)]
     check("配额 2 -> 前两条接话、第三条沉默", results == [True, True, False], results)
 
+    RULED = dict(GROUP, sender_id="12345678")
+    OTHER = dict(GROUP, sender_id="88888888")
+    NOID = dict(GROUP)
+
+    print("\n[11b] 指定用户规则（闸门级端到端）")
+    set_cfg(probability=0.0, user_rules=[{"sid": "12345678", "probability": 1.0}])
+    ch = make_channel(require_mention=False)
+    check("规则用户概率 100%：未 @ 也回复", mention(ch, RULED) is True)
+    check("其他用户按全局概率 0 保持沉默", mention(ch, OTHER) is False)
+    check("消息没带用户标识 -> 走全局配置", mention(ch, NOID) is False)
+    check("统计计入 user_rule", plugin.stats["user_rule"] >= 1, plugin.stats)
+
+    print("\n[11c] 规则用户的冷却按「群+用户」独立记账")
+    set_cfg(
+        probability=1.0,
+        cooldown_seconds=60,
+        user_rules=[{"sid": "12345678", "cooldown_seconds": 0}],
+    )
+    ch = make_channel(require_mention=False)
+    check(
+        "规则用户显式冷却 0 -> 连发都回",
+        mention(ch, RULED) is True and mention(ch, RULED) is True,
+    )
+    check(
+        "状态键带用户后缀",
+        any(k.endswith(":u12345678") for k in plugin.state.snapshot()),
+        plugin.state.snapshot(),
+    )
+    set_cfg(
+        probability=1.0,
+        cooldown_seconds=60,
+        user_rules=[{"sid": "12345678", "cooldown_seconds": 30}],
+    )
+    ch = make_channel(require_mention=False)
+    check(
+        "规则用户继承冷却 30s -> 第二条沉默",
+        mention(ch, RULED) is True and mention(ch, RULED) is False,
+    )
+
+    print("\n[11d] 用户规则不影响 @ 必回")
+    set_cfg(
+        probability=0.0,
+        user_rules=[{"sid": "12345678", "probability": 0.0}],
+    )
+    ch = make_channel(require_mention=False)
+    check(
+        "规则概率 0 但被 @ 仍回复",
+        mention(ch, dict(AT, sender_id="12345678")) is True,
+    )
+
+    print("\n[11e] 「仅 @ 回复」开启时规则同样让位")
+    set_cfg(probability=0.0, user_rules=[{"sid": "12345678", "probability": 1.0}])
+    ch = make_channel(require_mention=True)
+    check("仅 @ 模式下规则用户未 @ 不回复", mention(ch, RULED) is False)
+
     print("\n[12] 统计")
     print("     stats:", plugin.stats)
     check("统计里有主动接话记录", plugin.stats["proactive"] > 0, plugin.stats)
@@ -190,7 +245,13 @@ def main():
 
     class Ctx:
         session_id = "onebot:group_123456"
-        payload = {"meta": {"group_id": "123456", "is_group": True}}
+        payload = {
+            "meta": {
+                "group_id": "123456",
+                "is_group": True,
+                "sender_id": "12345678",
+            }
+        }
         user_id = "u1"
         agent_id = "default"
         workspace = None
@@ -205,6 +266,7 @@ def main():
         print("       " + line)
     check("返回里包含群 ID", "123456" in text, text)
     check("返回里包含会话 ID", "onebot:group_123456" in text, text)
+    check("返回里包含用户 ID", "12345678" in text, text)
 
     print("\n" + "=" * 60)
     print(f"通过 {PASSED} 项，失败 {len(FAILED)} 项")

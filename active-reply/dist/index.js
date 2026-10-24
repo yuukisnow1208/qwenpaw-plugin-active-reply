@@ -15,6 +15,10 @@
  * 宿主的 QP.host.fetch 内部会先过一遍 getApiUrl()，等价于 "/api" + path；
  * 再传 "/api/active-reply/config" 会被拼成 "/api/api/active-reply/config"
  * → GET 404、PUT 405。这里按宿主规则自动选择正确写法，并留了 404/405 重试兜底。
+ *
+ * v1.1.0：新增「指定用户规则」——对特定用户（sid）单独设定回复参数
+ * （概率 / 方法 / 每分钟配额 / 冷却 / 最小间隔），没填的项继承全局设置。
+ * 规则命中后冷却、间隔、配额按「群 + 用户」独立记账。
  */
 
 (function () {
@@ -72,6 +76,17 @@
     cooldown_seconds: 0,
     max_per_minute: 3,
     min_interval_seconds: 0,
+    user_rules: [],
+  };
+
+  // 指定用户规则里「留空 = 继承全局」的字段，新建规则时的初始值
+  var EMPTY_RULE = {
+    sid: "",
+    probability: null,
+    method: null,
+    max_per_minute: null,
+    cooldown_seconds: null,
+    min_interval_seconds: null,
   };
 
   function callFetch(url, options) {
@@ -281,9 +296,173 @@
       });
     }
 
+    // ---------------- 指定用户规则 ----------------
+    function setRule(index, patch) {
+      var list = (cfg.user_rules || []).slice();
+      list[index] = Object.assign({}, list[index] || EMPTY_RULE, patch);
+      setField({ user_rules: list });
+    }
+
+    function addRule() {
+      var list = (cfg.user_rules || []).slice();
+      list.push(Object.assign({}, EMPTY_RULE));
+      setField({ user_rules: list });
+    }
+
+    function removeRule(index) {
+      var list = (cfg.user_rules || []).slice();
+      list.splice(index, 1);
+      setField({ user_rules: list });
+    }
+
+    function renderRule(rule, index) {
+      var numStyle = { width: "140px" };
+      return h(
+        "div",
+        {
+          key: index,
+          style: {
+            border: "1px solid rgba(128,128,128,0.3)",
+            borderRadius: "6px",
+            padding: "10px",
+            marginBottom: "8px",
+          },
+        },
+        h(
+          "div",
+          { style: { display: "flex", gap: "8px", alignItems: "center" } },
+          h(Input, {
+            value: rule.sid || "",
+            placeholder: "用户 ID（必填，如 12345678）",
+            style: { flex: "1 1 auto", minWidth: "160px" },
+            onChange: function (e) {
+              setRule(index, { sid: e.target.value });
+            },
+          }),
+          h(InputNumber, {
+            min: 0,
+            max: 1,
+            step: 0.01,
+            value: rule.probability == null ? null : Number(rule.probability),
+            placeholder: "概率 留空继承",
+            style: { width: "130px" },
+            onChange: function (v) {
+              setRule(index, { probability: v == null ? null : v });
+            },
+          }),
+          h(
+            Button,
+            {
+              size: "small",
+              danger: true,
+              onClick: function () {
+                removeRule(index);
+              },
+            },
+            "删除",
+          ),
+        ),
+        h(
+          "div",
+          {
+            style: {
+              display: "flex",
+              gap: "8px",
+              marginTop: "8px",
+              flexWrap: "wrap",
+              alignItems: "center",
+            },
+          },
+          h(Select, {
+            value: rule.method == null ? "__inherit__" : rule.method,
+            style: { width: "200px" },
+            onChange: function (v) {
+              setRule(index, { method: v === "__inherit__" ? null : v });
+            },
+            options: [
+              { value: "__inherit__", label: "方法：继承全局" },
+              { value: "possibility_reply", label: "possibility_reply（概率）" },
+              { value: "rate_limit", label: "rate_limit（每分钟配额）" },
+            ],
+          }),
+          h(InputNumber, {
+            min: 0,
+            step: 1,
+            value: rule.max_per_minute == null ? null : rule.max_per_minute,
+            placeholder: "每分钟配额",
+            style: numStyle,
+            onChange: function (v) {
+              setRule(index, { max_per_minute: v == null ? null : v });
+            },
+          }),
+          h(InputNumber, {
+            min: 0,
+            step: 1,
+            value:
+              rule.cooldown_seconds == null ? null : rule.cooldown_seconds,
+            placeholder: "冷却（秒）",
+            style: numStyle,
+            onChange: function (v) {
+              setRule(index, { cooldown_seconds: v == null ? null : v });
+            },
+          }),
+          h(InputNumber, {
+            min: 0,
+            step: 1,
+            value:
+              rule.min_interval_seconds == null
+                ? null
+                : rule.min_interval_seconds,
+            placeholder: "最小间隔（秒）",
+            style: numStyle,
+            onChange: function (v) {
+              setRule(index, { min_interval_seconds: v == null ? null : v });
+            },
+          }),
+        ),
+      );
+    }
+
     if (!cfg) {
       return h("div", { style: { padding: "24px" } }, "加载中…");
     }
+
+    var userRulesPanel = h(
+      "div",
+      { style: { marginTop: "4px" } },
+      h(
+        "div",
+        { style: { fontWeight: 600, marginBottom: "4px" } },
+        "指定用户规则",
+      ),
+      h(
+        "div",
+        {
+          style: {
+            fontSize: "12px",
+            opacity: 0.65,
+            lineHeight: "1.6",
+            whiteSpace: "pre-wrap",
+            marginBottom: "8px",
+          },
+        },
+        "对特定用户（sid）单独设定回复参数：命中的用户按规则回复，没填的项继承上面的全局设置。\n" +
+          "概率只在 possibility_reply（概率）方法下生效；冷却 / 最小间隔 / 配额按「群 + 用户」独立记账。\n" +
+          "用户 ID 可在群里 @ 机器人发 /sid 获取。规则只在白名单放行的群里生效，且仅在「仅 @ 回复」关闭时起作用。",
+      ),
+      (cfg.user_rules || []).length
+        ? (cfg.user_rules || []).map(renderRule)
+        : h(
+            "div",
+            { style: { fontSize: "12px", opacity: 0.5, marginBottom: "8px" } },
+            "当前没有规则，所有人按全局参数处理",
+          ),
+      h(
+        Button,
+        { type: "dashed", onClick: addRule, style: { width: "100%" } },
+        "＋ 添加用户规则",
+      ),
+    );
 
     var saveButtons = h(
       Space,
@@ -525,6 +704,9 @@
             stats.whitelist_skipped
               ? h("div", null, "因白名单跳过：" + stats.whitelist_skipped)
               : null,
+            stats.user_rule
+              ? h("div", null, "指定用户规则命中：" + stats.user_rule)
+              : null,
             stats.errors ? h("div", null, "判定异常回退：" + stats.errors) : null,
           )
         : h("div", { style: { fontSize: "13px", opacity: 0.6 } }, "读取中…"),
@@ -627,6 +809,8 @@
         Card,
         null,
         rows,
+        h(Divider, null),
+        userRulesPanel,
         h(Divider, null),
         h(
           "div",

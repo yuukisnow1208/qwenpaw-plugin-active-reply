@@ -26,6 +26,8 @@
 
 当前频道的开关状态会显示在插件**设置页顶部**的常驻提示里；在群里 @ 机器人发 `/sid` 也能看到。
 
+在 1.1.0 之后，还可以**对特定用户（sid）单独设定回复参数**——比如让某个用户的未 @ 消息 100% 被接话，见「四、配置项」里的 `user_rules`。
+
 ## 二、实现原理
 
 所有支持群聊的通道（OneBot/QQ、Telegram、飞书、Discord、元宝……）收到群消息后，
@@ -66,7 +68,7 @@ require_mention=False → 未 @ 消息掷骰子，命中则放行进入 agent �
 ## 三、安装
 
 ```bash
-# WebUI：Console → 插件 → 安装插件，拖入 active-reply-1.0.4.zip
+# WebUI：Console → 插件 → 安装插件，拖入 active-reply-1.1.0.zip
 # 或命令行
 qwenpaw plugin install ./active-reply
 ```
@@ -88,8 +90,41 @@ qwenpaw plugin install ./active-reply
 | `cooldown_seconds` | `0` | 主动回复一次后，隔多久才允许再次主动回复 |
 | `min_interval_seconds` | `0` | 同一群两条主动回复之间的最小间隔 |
 | `max_per_minute` | `3` | `rate_limit` 模式下每个群每分钟的主动回复上限 |
+| `user_rules` | `[]` | **指定用户规则**：对特定用户（sid）单独设定回复参数，见下节 |
 
-### 白名单怎么拿群 ID
+### 指定用户规则（user_rules）
+
+给某个人单独设参数。比如对 sid（用户 ID）为 `12345678` 的用户，未 @ 也 100% 主动接话：
+
+```json
+{
+  "user_rules": [
+    { "sid": "12345678", "probability": 1.0 }
+  ]
+}
+```
+
+每条规则可用的字段（除 `sid` 外**留空 / `null` 都表示继承全局配置**）：
+
+| 字段 | 说明 |
+| --- | --- |
+| `sid` | 必填。用户 ID（QQ 号 / open_id 等），在群里 @ 机器人发 `/sid` 即可拿到 |
+| `probability` | 覆盖全局概率，0.0~1.0 |
+| `method` | 覆盖全局方法（`possibility_reply` / `rate_limit`） |
+| `max_per_minute` | `rate_limit` 模式下每分钟配额 |
+| `cooldown_seconds` | 冷却秒数。**显式 `0` = 该用户不冷却**（区别于留空继承全局） |
+| `min_interval_seconds` | 最小间隔秒数 |
+
+规则要点：
+
+1. **层级**：判定顺序是 频道「仅 @ 回复」开关 → 群白名单 → 用户规则。规则只在白名单放行的群里、且「仅 @ 回复」关闭时才起作用。
+2. **独立记账**：命中的用户按「群 + 用户」独立计算冷却 / 最小间隔 / 配额，与群里其他用户互不影响；该用户的主动回复也不占用群维度的冷却。
+3. **`0` 与留空不同**：留空 = 继承全局；显式 `0` = 强制关闭。想让人「必回且永不被冷却卡住」就写 `probability: 1.0` + `cooldown_seconds: 0`。
+4. **顺序即优先级**：一个用户命中多条规则时取第一条。
+5. **概率跟方法走**：`probability` 仅在 `possibility_reply` 下生效。如果全局方法是 `rate_limit`，规则里要同时写 `"method": "possibility_reply"`（或改为覆盖 `max_per_minute`）。
+6. **通道支持**：OneBot/QQ、飞书、元宝在消息闸门处就带用户 ID，规则可用；Telegram / Discord 的用户 ID 在闸门之后才进入流程，这两家的规则暂不生效。
+
+### 用户 ID / 群 ID 怎么拿
 
 在群里 **@ 机器人 然后发 `/sid`**，它会回你：
 
@@ -97,11 +132,12 @@ qwenpaw plugin install ./active-reply
 📍 会话 ID：onebot:group_123456
 👥 群 ID：123456
 把上面的群 ID 填进「主动回复白名单」即可。
+👤 用户 ID：12345678（填进「指定用户规则」可对这个人单独设定回复参数）
 ⚙️ 当前状态：开启 · possibility_reply · 概率 0.1
 📢 频道「仅 @ 回复」：关闭 → @ 必回，不 @ 按概率回
 ```
 
-把 `123456` 填进白名单即可。留空则对所有群生效。
+把 `123456` 填进白名单、把 `12345678` 填进指定用户规则即可。白名单留空则对所有群生效。
 
 > 注意：群里若开启了「仅 @ 回复」，`/sid` 本身也需要 @ 机器人才会被处理——这是原逻辑的闸门，插件不改变它。
 
@@ -111,14 +147,23 @@ qwenpaw plugin install ./active-reply
 | --- | --- | --- |
 | GET | `/api/active-reply/config` | 读取配置 |
 | PUT | `/api/active-reply/config` | 热更新配置，立即生效 |
-| GET | `/api/active-reply/status` | 运行统计；含 `require_mention`（频道「仅 @ 回复」开关状态） |
-| POST | `/api/active-reply/simulate` | 按当前概率模拟 1000 条，返回预计回复条数 |
+| GET | `/api/active-reply/status` | 运行统计；含 `require_mention`（频道开关状态）与 `user_rule_count` |
+| POST | `/api/active-reply/simulate` | 按当前概率模拟 1000 条，返回预计回复条数；body 传 `{"sid": "..."}` 可按该用户命中的规则参数试算 |
 | POST | `/api/active-reply/reset-stats` | 统计清零 |
 
 ```bash
 # 把概率调到 0.3
 curl -X PUT http://127.0.0.1:8088/api/active-reply/config \
   -H 'Content-Type: application/json' -d '{"probability": 0.3}'
+
+# 给用户 12345678 单独设 100% 概率（与全局配置合并保存）
+curl -X PUT http://127.0.0.1:8088/api/active-reply/config \
+  -H 'Content-Type: application/json' \
+  -d '{"user_rules": [{"sid": "12345678", "probability": 1.0}]}'
+
+# 按该用户命中的规则参数试算 1000 条
+curl -X POST http://127.0.0.1:8088/api/active-reply/simulate \
+  -H 'Content-Type: application/json' -d '{"sid": "12345678"}'
 
 # 看看有没有真的生效（require_mention 即频道开关状态）
 curl -s http://127.0.0.1:8088/api/active-reply/status
@@ -141,10 +186,10 @@ WebUI 里则用页面上的「保存更改」按钮，保存结果有明确提�
 ## 七、自测
 
 ```bash
-python tests/test_core.py            # 核心逻辑 35 项（纯 Python，无需 QwenPaw）
+python tests/test_core.py            # 核心逻辑 71 项（纯 Python，无需 QwenPaw）
 ```
 
-容器内端到端验证（真实调用 `_check_group_mention`）：
+容器内端到端验证（真实调用 `_check_group_mention`，38 项）：
 
 ```bash
 /app/venv/bin/python /tmp/active_reply_test/tests/test_in_container.py
@@ -167,6 +212,7 @@ active-reply/
 
 | 版本 | 说明 |
 | --- | --- |
+| 1.1.0 | 新增「指定用户规则」：对特定用户（sid）单独设定概率 / 方法 / 每分钟配额 / 冷却 / 最小间隔（留空继承全局，显式 0 强制关闭），规则命中按「群+用户」独立记账，`/sid` 增加用户 ID 输出，`/simulate` 支持按 sid 试算，设置页新增规则编辑区。另修复全新安装时 config.json 空文件误报「解析失败」、`defaults()` 对 `default_factory` 字段返回 MISSING 哨兵的问题 |
 | 1.0.4 | 设置页菜单项增加图标 💬（扩展设置列表中可见），功能无变化 |
 | 1.0.3 | 修复设置页「保存失败：HTTP 405 Method Not Allowed」以及刷新后参数丢失。原因：宿主 `QP.host.fetch` 内部会先过 `getApiUrl()`（等价于再补一个 `/api`），前端若传 `/api/active-reply/config` 会被拼成 `/api/api/active-reply/config` → GET 404（页面只能显示默认值）、PUT 405。现按宿主规则自动选择正确写法，并在 404/405 时自动换写法重试一次 |
 | 1.0.2 | 设置页改为显式保存（「保存更改」/「撤销更改」按钮 + 未保存提示），保存失败显示具体原因 |

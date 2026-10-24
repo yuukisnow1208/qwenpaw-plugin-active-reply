@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import random
 import time
-from dataclasses import dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 #: 主动回复方法
@@ -36,6 +36,27 @@ GROUP_ID_KEYS = (
     "guild_id",
     "room_id",
     "conversation_id",
+)
+
+#: 不同通道在闸门处的 meta 里描述「发消息的人」的字段名（按优先级）。
+#: OneBot/QQ: sender_id；元宝: raw_sender_id；飞书: feishu_sender_id。
+#: Telegram / Discord 在闸门时还没把用户 ID 放进 meta，指定用户规则对它们不生效。
+USER_ID_KEYS = (
+    "sender_id",
+    "user_id",
+    "acl_sender_id",
+    "raw_sender_id",
+    "feishu_sender_id",
+    "qq",
+)
+
+#: 用户规则里可覆盖的配置字段（sid 是必填标识，不在此列）
+USER_RULE_FIELDS = (
+    "probability",
+    "method",
+    "max_per_minute",
+    "cooldown_seconds",
+    "min_interval_seconds",
 )
 
 
@@ -64,6 +85,15 @@ class ActiveReplyConfig:
     min_interval_seconds: float = 0.0
     """同一群里两条主动回复之间的最小间隔（秒）。0 表示不限制。"""
 
+    user_rules: List[Dict[str, Any]] = field(default_factory=list)
+    """指定用户规则。每条规则：{"sid": 用户ID, ...可覆盖字段}。
+
+    可覆盖字段（值为 None / 缺省表示继承全局配置）：
+        probability / method / max_per_minute / cooldown_seconds / min_interval_seconds
+    规则命中的消息按「群 + 用户」独立记账冷却、间隔与配额。
+    顺序即优先级：一个用户命中多条规则时取第一条。
+    """
+
     # ------------------------------------------------------------------
     @classmethod
     def defaults(cls) -> Dict[str, Any]:
@@ -79,6 +109,10 @@ class ActiveReplyConfig:
         for key, value in data.items():
             if key not in valid or value is None:
                 continue
+            if key == "user_rules":
+                # 规则列表交给 sanitize 逐条规整，这里不能按字符串列表强行转换
+                cfg.user_rules = value if isinstance(value, list) else []
+                continue
             setattr(cfg, key, _coerce(key, value, getattr(baseline, key)))
         return sanitize(cfg)
 
@@ -89,11 +123,16 @@ class ActiveReplyConfig:
         return ActiveReplyConfig.from_dict({**self.to_dict(), **(patch or {})})
 
 
-def _copy_default(f):
-    value = f.default
-    if isinstance(value, list):
-        return list(value)
-    return value
+def _copy_default(f) -> Any:
+    if f.default is not MISSING:
+        value = f.default
+        return list(value) if isinstance(value, list) else value
+    if f.default_factory is not MISSING:
+        try:
+            return f.default_factory()
+        except TypeError:
+            return None
+    return None
 
 
 def _coerce(key: str, value: Any, default: Any) -> Any:
@@ -128,7 +167,56 @@ def sanitize(cfg: ActiveReplyConfig) -> ActiveReplyConfig:
     cfg.min_interval_seconds = max(0.0, cfg.min_interval_seconds)
     cfg.max_per_minute = max(0, cfg.max_per_minute)
     cfg.whitelist = [str(x).strip() for x in cfg.whitelist if str(x).strip()]
+    rules = cfg.user_rules if isinstance(cfg.user_rules, list) else []
+    cfg.user_rules = [
+        rule for rule in (normalize_user_rule(raw) for raw in rules) if rule
+    ]
     return cfg
+
+
+# ----------------------------------------------------------------------
+# 指定用户规则
+# ----------------------------------------------------------------------
+def _rule_number(value: Any, cast, clamp) -> Optional[Any]:
+    """规则字段转数字；空 / 非法一律视为 None（继承全局）。"""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        return clamp(cast(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_user_rule(raw: Any) -> Optional[Dict[str, Any]]:
+    """规整一条用户规则；sid 缺失等无效规则返回 None（会被丢弃）。
+
+    字段值为 None 表示「继承全局配置」；显式 0 是合法覆盖（比如冷却 0 = 不冷却）。
+    """
+    if not isinstance(raw, dict):
+        return None
+    sid = str(raw.get("sid") or raw.get("user_id") or "").strip()
+    if not sid:
+        return None
+    rule: Dict[str, Any] = {"sid": sid}
+    rule["probability"] = _rule_number(
+        raw.get("probability"), float, lambda v: min(1.0, max(0.0, v)),
+    )
+    method = raw.get("method")
+    rule["method"] = (
+        str(method).strip() if str(method or "").strip() in METHODS else None
+    )
+    rule["max_per_minute"] = _rule_number(
+        raw.get("max_per_minute"), lambda v: int(float(v)), lambda v: max(0, v),
+    )
+    rule["cooldown_seconds"] = _rule_number(
+        raw.get("cooldown_seconds"), float, lambda v: max(0.0, v),
+    )
+    rule["min_interval_seconds"] = _rule_number(
+        raw.get("min_interval_seconds"), float, lambda v: max(0.0, v),
+    )
+    return rule
 
 
 # ----------------------------------------------------------------------
@@ -157,10 +245,76 @@ def in_whitelist(cfg: ActiveReplyConfig, ids: Iterable[str]) -> bool:
     return any(str(i) in allowed for i in ids)
 
 
+def user_ids(meta: Optional[Dict[str, Any]]) -> List[str]:
+    """从 meta 里取出所有可能的「发消息的人」标识（不同通道字段名不同）。"""
+    if not isinstance(meta, dict):
+        return []
+    out: List[str] = []
+
+    def _push(value: Any) -> None:
+        if value in (None, ""):
+            return
+        text = str(value).strip()
+        if text and text not in out:
+            out.append(text)
+
+    for key in USER_ID_KEYS:
+        _push(meta.get(key))
+    # 有些通道把发送者塞进嵌套的 sender / author 对象
+    for key in ("sender", "author"):
+        nested = meta.get(key)
+        if isinstance(nested, dict):
+            for sub in ("user_id", "id", "qq", "sender_id"):
+                _push(nested.get(sub))
+    return out
+
+
+def match_user_rule(
+    cfg: ActiveReplyConfig,
+    ids: Iterable[str],
+) -> Optional[Dict[str, Any]]:
+    """返回第一条命中的用户规则；没命中返回 None。配置顺序即优先级。"""
+    candidates = {str(i).strip() for i in ids if str(i).strip()}
+    if not candidates:
+        return None
+    for rule in cfg.user_rules or []:
+        sid = str(rule.get("sid", "")).strip() if isinstance(rule, dict) else ""
+        if sid and sid in candidates:
+            return rule
+    return None
+
+
+def effective_config(
+    cfg: ActiveReplyConfig,
+    rule: Optional[Dict[str, Any]],
+) -> ActiveReplyConfig:
+    """把规则里显式设置的字段叠加到全局配置上；None 的字段继承全局。"""
+    if not isinstance(rule, dict):
+        return cfg
+    patch = {
+        key: rule[key]
+        for key in USER_RULE_FIELDS
+        if rule.get(key) is not None
+    }
+    if not patch:
+        return cfg
+    return cfg.merge(patch)
+
+
 def state_key(channel_name: str, ids: Iterable[str]) -> str:
     """冷却/限流的状态键：通道 + 群标识。"""
     ids = list(ids)
     return f"{channel_name or '?'}:{ids[0] if ids else '-'}"
+
+
+def user_state_key(
+    channel_name: str,
+    ids: Iterable[str],
+    user_id: str,
+) -> str:
+    """指定用户命中的消息按「群 + 用户」记账，冷却/间隔/配额与群里其他人互不影响。"""
+    ids = list(ids)
+    return f"{channel_name or '?'}:{ids[0] if ids else '-'}:u{user_id}"
 
 
 # ----------------------------------------------------------------------

@@ -7,6 +7,8 @@
 行为规则（与频道「仅 @ 回复」开关协同）：
     - 频道「仅 @ 回复」**开启**：只有 @ 才回复，插件不主动插话（尊重频道设置）
     - 频道「仅 @ 回复」**关闭**：@ 必回；没 @ 的按概率回
+    - 「指定用户规则」命中时，用该用户的参数代替全局参数（如对某 sid 概率 100%），
+      且按「群 + 用户」独立记账冷却/间隔/配额
 
 实现原理
 --------
@@ -50,7 +52,7 @@ import core  # noqa: E402  （同目录下的纯逻辑模块）
 logger = logging.getLogger("qwenpaw.plugin.active_reply")
 
 PLUGIN_ID = "active-reply"
-VERSION = "1.0.4"
+VERSION = "1.1.0"
 
 #: 判定原因 -> 中文说明，用于日志与设置页统计
 REASON_TEXT = {
@@ -79,6 +81,7 @@ class ActiveReplyPlugin:
             "ignored": 0,
             "mention_mode": 0,
             "whitelist_skipped": 0,
+            "user_rule": 0,
             "errors": 0,
         }
         self.require_mention_state: Optional[bool] = None
@@ -95,13 +98,14 @@ class ActiveReplyPlugin:
         self._register_command()
         self._register_routes()
         logger.info(
-            "主动回复插件已加载 v%s | 配置=%s | 启用=%s | 方法=%s | 概率=%s | 白名单=%s",
+            "主动回复插件已加载 v%s | 配置=%s | 启用=%s | 方法=%s | 概率=%s | 白名单=%s | 用户规则=%s条",
             VERSION,
             self.config_path,
             self.config.enabled,
             self.config.method,
             self.config.probability,
             self.config.whitelist or "全部群",
+            len(self.config.user_rules or []),
         )
 
     # ------------------------------------------------------------------
@@ -112,7 +116,8 @@ class ActiveReplyPlugin:
         file_data: Dict[str, Any] = {}
         if path.exists():
             try:
-                file_data = json.loads(path.read_text(encoding="utf-8")) or {}
+                text = path.read_text(encoding="utf-8").strip()
+                file_data = json.loads(text) if text else {}
             except (OSError, ValueError):
                 logger.warning("主动回复：配置文件解析失败，使用默认配置 %s", path)
                 file_data = {}
@@ -223,19 +228,35 @@ class ActiveReplyPlugin:
             self.stats["whitelist_skipped"] += 1
             return original_result
 
-        key = core.state_key(getattr(channel, "channel", ""), ids)
+        # 指定用户规则：命中的用户用规则里的参数（未设置的字段继承全局），
+        # 且按「群 + 用户」独立记账冷却/间隔/配额，与群里其他人互不影响。
+        rule = core.match_user_rule(cfg, core.user_ids(meta))
+        channel_name = getattr(channel, "channel", "")
+        if rule is not None:
+            eff_cfg = core.effective_config(cfg, rule)
+            key = core.user_state_key(channel_name, ids, rule["sid"])
+            self.stats["user_rule"] += 1
+        else:
+            eff_cfg = cfg
+            key = core.state_key(channel_name, ids)
+
         allowed, reason = core.decide(
-            cfg, self.state, key, now=time.time(), require_mention=require_mention
+            eff_cfg, self.state, key, now=time.time(), require_mention=require_mention
         )
 
+        who = rule["sid"] if rule else "-"
         if allowed:
             self.stats["proactive"] += 1
             logger.info(
-                "主动回复: channel=%s group=%s 概率=%s 方法=%s -> 接话",
-                getattr(channel, "channel", "?"),
+                "主动回复: channel=%s group=%s user=%s %s -> 接话 "
+                "(概率=%s 方法=%s%s)",
+                channel_name,
                 ids[0] if ids else "-",
-                cfg.probability,
-                cfg.method,
+                who,
+                "用户规则生效" if rule else "按全局配置",
+                eff_cfg.probability,
+                eff_cfg.method,
+                "，冷却={}s".format(eff_cfg.cooldown_seconds) if rule else "",
             )
             return True
 
@@ -244,9 +265,10 @@ class ActiveReplyPlugin:
         else:
             self.stats["ignored"] += 1
         logger.debug(
-            "主动回复: channel=%s group=%s -> %s",
-            getattr(channel, "channel", "?"),
+            "主动回复: channel=%s group=%s user=%s -> %s",
+            channel_name,
             ids[0] if ids else "-",
+            who,
             REASON_TEXT.get(reason, reason),
         )
         return False
@@ -272,15 +294,30 @@ class ActiveReplyPlugin:
             async def handle(self, context: Any) -> str:
                 meta = plugin._payload_meta(getattr(context, "payload", None))
                 ids = core.group_ids(meta)
+                user_ids = core.user_ids(meta)
                 lines = ["📍 会话 ID：" + str(getattr(context, "session_id", "") or "-")]
                 if ids:
                     lines.append("👥 群 ID：" + ids[0])
                     extra = [i for i in ids[1:]]
                     if extra:
                         lines.append("　其它标识：" + "、".join(extra))
-                    lines.append("把上面的群 ID 填进「主动回复白名单」即可。" if plugin.config.whitelist else "把上面的群 ID 填进「主动回复白名单」可限定生效范围。")
+                    lines.append(
+                        "把上面的群 ID 填进「主动回复白名单」即可。"
+                        if plugin.config.whitelist
+                        else "把上面的群 ID 填进「主动回复白名单」可限定生效范围。"
+                    )
                 else:
                     lines.append("👥 群 ID：（当前会话不是群聊）")
+                if user_ids:
+                    lines.append(
+                        "👤 用户 ID：" + user_ids[0]
+                        + "（填进「指定用户规则」可对这个人单独设定回复参数）"
+                    )
+                    extra_users = [u for u in user_ids[1:]]
+                    if extra_users:
+                        lines.append("　其它候选：" + "、".join(extra_users))
+                else:
+                    lines.append("👤 用户 ID：（这条消息里没带用户标识）")
                 lines.append(
                     f"⚙️ 当前状态：{'开启' if plugin.config.enabled else '关闭'} · "
                     f"{plugin.config.method} · 概率 {plugin.config.probability}",
@@ -309,7 +346,7 @@ class ActiveReplyPlugin:
                 return meta
             return {
                 key: payload[key]
-                for key in core.GROUP_ID_KEYS
+                for key in core.GROUP_ID_KEYS + core.USER_ID_KEYS
                 if payload.get(key) not in (None, "")
             }
         meta = getattr(payload, "channel_meta", None)
@@ -366,6 +403,7 @@ class ActiveReplyPlugin:
                 "stats": dict(plugin.stats),
                 "groups": plugin.state.snapshot(),
                 "require_mention": plugin.require_mention_state,
+                "user_rule_count": len(plugin.config.user_rules or []),
                 "config_path": str(plugin.config_path or ""),
             }
 
@@ -376,7 +414,19 @@ class ActiveReplyPlugin:
             draws = int(payload.get("draws") or 1000)
             override = payload.get("config") or {}
             cfg = plugin.config.merge(override) if isinstance(override, dict) and override else plugin.config
-            return {"ok": True, **core.simulate(cfg, draws=draws)}
+            sid = str(payload.get("sid") or "").strip()
+            applied_rule = False
+            if sid:
+                rule = core.match_user_rule(cfg, [sid])
+                if rule is not None:
+                    cfg = core.effective_config(cfg, rule)
+                    applied_rule = True
+            return {
+                "ok": True,
+                "sid": sid or None,
+                "rule_applied": applied_rule,
+                **core.simulate(cfg, draws=draws),
+            }
 
         @router.post("/reset-stats")
         async def reset_stats() -> Dict[str, Any]:
