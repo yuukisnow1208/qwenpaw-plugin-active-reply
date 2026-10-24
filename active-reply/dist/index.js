@@ -644,6 +644,7 @@
       QP.menu.add(PLUGIN_ID, {
         id: "active-reply.settings",
         label: "主动回复",
+        icon: "💬",
         route: "active-reply.settings",
         location: "primary.settings",
         order: 101,

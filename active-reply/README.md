@@ -66,7 +66,7 @@ require_mention=False → 未 @ 消息掷骰子，命中则放行进入 agent �
 ## 三、安装
 
 ```bash
-# WebUI：Console → 插件 → 安装插件，拖入 active-reply-1.0.3.zip
+# WebUI：Console → 插件 → 安装插件，拖入 active-reply-1.0.4.zip
 # 或命令行
 qwenpaw plugin install ./active-reply
 ```
@@ -167,6 +167,7 @@ active-reply/
 
 | 版本 | 说明 |
 | --- | --- |
+| 1.0.4 | 设置页菜单项增加图标 💬（扩展设置列表中可见），功能无变化 |
 | 1.0.3 | 修复设置页「保存失败：HTTP 405 Method Not Allowed」以及刷新后参数丢失。原因：宿主 `QP.host.fetch` 内部会先过 `getApiUrl()`（等价于再补一个 `/api`），前端若传 `/api/active-reply/config` 会被拼成 `/api/api/active-reply/config` → GET 404（页面只能显示默认值）、PUT 405。现按宿主规则自动选择正确写法，并在 404/405 时自动换写法重试一次 |
 | 1.0.2 | 设置页改为显式保存（「保存更改」/「撤销更改」按钮 + 未保存提示），保存失败显示具体原因 |
 | 1.0.1 | 尊重频道「仅 @ 回复」开关：开启时插件完全让位（只有 @ 才回复）；关闭时 @ 必回、不 @ 按概率回。规则写进设置页顶部提示、README 开篇与 `/sid` 输出 |
