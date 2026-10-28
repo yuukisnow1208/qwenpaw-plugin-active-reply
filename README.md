@@ -206,6 +206,7 @@ active-reply/
 
 | 版本 | 说明 |
 | --- | --- |
+| 1.1.1 | 兼容 QwenPaw 2.0.x：放宽 `qwenpaw_version.min` 到 2.0.0（此前 2.2.0 会导致插件在 2.0.1 上被判定不兼容、后端不加载，设置页保存报 HTTP 405）；内部模块 `core.py` 改名 `active_reply_core.py`，避免与其它插件同名模块冲突 |
 | 1.1.0 | 新增「指定用户规则」：对特定用户（sid）单独设定概率 / 方法 / 每分钟配额 / 冷却 / 最小间隔（留空继承全局，显式 0 强制关闭），规则命中按「群+用户」独立记账，`/sid` 增加用户 ID 输出，`/simulate` 支持按 sid 试算，设置页新增规则编辑区。另修复全新安装时 config.json 空文件误报「解析失败」、`defaults()` 对 `default_factory` 字段返回 MISSING 哨兵的问题 |
 | 1.0.4 | 设置页菜单项增加图标 💬（扩展设置列表中可见），功能无变化 |
 | 1.0.3 | 修复设置页「保存失败：HTTP 405 Method Not Allowed」以及刷新后参数丢失。原因：宿主 `QP.host.fetch` 内部会先过 `getApiUrl()`（等价于再补一个 `/api`），前端若传 `/api/active-reply/config` 会被拼成 `/api/api/active-reply/config` → GET 404（页面只能显示默认值）、PUT 405。现按宿主规则自动选择正确写法，并在 404/405 时自动换写法重试一次 |

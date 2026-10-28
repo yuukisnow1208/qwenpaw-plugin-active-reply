@@ -47,12 +47,12 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-import core  # noqa: E402  （同目录下的纯逻辑模块）
+import active_reply_core as core  # noqa: E402  （同目录下的纯逻辑模块，改名避免与其它插件的 core 冲突）
 
 logger = logging.getLogger("qwenpaw.plugin.active_reply")
 
 PLUGIN_ID = "active-reply"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 #: 判定原因 -> 中文说明，用于日志与设置页统计
 REASON_TEXT = {

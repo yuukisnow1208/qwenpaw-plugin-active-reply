@@ -1,7 +1,7 @@
 {
   "id": "active-reply",
   "name": "主动回复",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "general",
   "description": "群聊「仅 @ 回复」关闭时，未被 @ 的消息按概率选择性回复，让机器人像群友一样偶尔接话；支持对特定用户（sid）单独设定回复参数（如概率 100%）；「仅 @ 回复」开启时完全让位，只有 @ 才回复。",
   "author": "Yuukisnow",
@@ -11,7 +11,7 @@
   },
   "dependencies": [],
   "qwenpaw_version": {
-    "min": "2.2.0"
+    "min": "2.0.0"
   },
   "meta": {
     "settings_route": "active-reply.settings",

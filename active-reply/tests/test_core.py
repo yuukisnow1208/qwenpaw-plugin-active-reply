@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import core  # noqa: E402
+import active_reply_core as core  # noqa: E402
 
 PASSED = 0
 FAILED = []
